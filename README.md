@@ -1,6 +1,6 @@
 # hawk
 
-**H**elps **A**gents **W**atch **K**ommands
+**H**elps **A**gents **W**atch **K**ommands and Hawk-tui spits that shit (logs) out, you know what I am sayin' ?
 
 A lightweight task log manager designed for both humans and AI agents (Claude Code). Run long-running commands with automatic log capture — both you and your AI can see what's happening.
 
