@@ -14,11 +14,19 @@ A lightweight task log manager designed for both humans and AI agents (Claude Co
 
 ## Why?
 
-AI coding agents (Claude Code, etc.) run commands in the background but you can't see the output. Terminals like tmux help, but not everyone uses tmux.
+Claude Code's `run_in_background` is great — your agent runs a build, you keep working, it gets notified when it's done. But:
 
-hawk gives both sides visibility:
-- **Agent** runs `hawk start test -- pnpm test-all` and gets notified on completion
-- **Human** runs `hawk tail test` or just `hawk` (fzf picker) to watch live output
+- **Logs vanish** into Claude's conversation context, cluttering your chat history
+- **You can't watch** a running build from your own terminal
+- **Logs don't persist** — once the conversation scrolls or compresses, they're gone
+- **tmux-based workarounds** tie you to a specific terminal setup and not everyone uses tmux
+
+hawk fixes all of this. It wraps `run_in_background` with a simple CLI that both Claude and you can use:
+
+- **Agent** runs `hawk start test -- pnpm test-all` — gets auto-notified on completion, checks results with `hawk output test`
+- **Human** runs `hawk tail test` from any terminal to watch live, or `hawk` for an interactive fzf picker
+- **Logs persist** in `/tmp/hawk-logs/<project>/` as readable, timestamped files — not buried in chat
+- **No tmux**, no special terminal setup, just a Go binary on your PATH
 
 One CLI. Two audiences. Zero dependencies beyond Go.
 
