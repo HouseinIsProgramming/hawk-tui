@@ -33,18 +33,19 @@ One CLI. Two audiences. Zero dependencies beyond Go.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/housien/hawk-tui/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/houseinisprogramming/hawk-tui/main/install.sh | bash
 ```
 
-This installs:
+This downloads a pre-built binary for your platform and installs:
 1. The `hawk` binary to `/usr/local/bin/`
 2. The Claude Code skill to `~/.claude/skills/hawk/`
 
-### Manual install
+Pre-built binaries are available for macOS (arm64, amd64) and Linux (arm64, amd64). Falls back to building from source if no binary is available.
+
+### From source
 
 ```bash
-# Build
-git clone https://github.com/housien/hawk-tui.git
+git clone https://github.com/houseinisprogramming/hawk-tui.git
 cd hawk-tui
 go build -o hawk .
 sudo cp hawk /usr/local/bin/
