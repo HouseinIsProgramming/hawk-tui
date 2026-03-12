@@ -362,7 +362,7 @@ Usage:
   hawk help                   Show this help
 
 Log location: /tmp/hawk-logs/<project>/
-Setup: go install github.com/housien/hawk-tui@latest`)
+Setup: go install github.com/houseinisprogramming/hawk-tui@latest`)
 }
 
 // --- helpers ---
