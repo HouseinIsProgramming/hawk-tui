@@ -63,6 +63,14 @@ func cmdStart(args []string) {
 		os.Exit(1)
 	}
 
+	// check if a task with this name is already running
+	if pid, ok := isRunning(name); ok {
+		fmt.Fprintf(os.Stderr, "hawk: %q is already running (PID %d)\n", name, pid)
+		fmt.Fprintf(os.Stderr, "hawk: use `hawk output %s` to check status\n", name)
+		fmt.Fprintf(os.Stderr, "hawk: use `hawk stop %s` to stop it first\n", name)
+		return
+	}
+
 	dir := logDir()
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "hawk: %v\n", err)
@@ -466,6 +474,29 @@ func findLog(name string) string {
 	// sort descending, return newest
 	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 	return matches[0]
+}
+
+func isRunning(name string) (int, bool) {
+	pidFile := findPidFile(name)
+	if pidFile == "" {
+		return 0, false
+	}
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0, false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return 0, false
+	}
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return 0, false
+	}
+	return pid, true
 }
 
 func findPidFile(name string) string {
