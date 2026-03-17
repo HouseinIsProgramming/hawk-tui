@@ -22,6 +22,14 @@ func main() {
 		return
 	}
 
+	// handle -w flag anywhere in args
+	for _, arg := range os.Args[1:] {
+		if arg == "-w" || arg == "--watch" {
+			runTUI()
+			return
+		}
+	}
+
 	switch os.Args[1] {
 	case "start":
 		cmdStart(os.Args[2:])
@@ -361,6 +369,7 @@ func cmdHelp() {
 
 Usage:
   hawk                        Interactive log selector (fzf)
+  hawk -w                     TUI: watch all running tasks
   hawk start <name> -- <cmd>  Start command with logging
   hawk list                   List logs for current project
   hawk output <name> [lines]  Show last N lines (default 100)
