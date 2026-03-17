@@ -132,29 +132,36 @@ func TestRenderLogLines(t *testing.T) {
 	m := model{width: 80, height: 24}
 
 	// empty
-	out := m.renderLogLines(nil, 80, 10)
+	out := m.renderLogLines(nil, 80, 10, 0)
 	if !strings.Contains(out, "no output") {
 		t.Error("expected 'no output' for empty lines")
 	}
 
-	// more lines than height
+	// more lines than height, scrollOffset=0 (at bottom)
 	lines := make([]string, 20)
 	for i := range lines {
 		lines[i] = "line " + strconv.Itoa(i)
 	}
-	out = m.renderLogLines(lines, 80, 5)
+	out = m.renderLogLines(lines, 80, 5, 0)
 	rendered := strings.Split(out, "\n")
 	if len(rendered) != 5 {
 		t.Errorf("expected 5 visible lines, got %d", len(rendered))
 	}
-	// should show last 5
+	// should show last 5 (lines 15-19)
 	if !strings.Contains(rendered[0], "line 15") {
 		t.Errorf("expected to start at line 15, got: %s", rendered[0])
 	}
 
+	// with scrollOffset=10, should show lines 5-9
+	out = m.renderLogLines(lines, 80, 5, 10)
+	rendered = strings.Split(out, "\n")
+	if !strings.Contains(rendered[0], "line 5") {
+		t.Errorf("expected to start at line 5 with offset 10, got: %s", rendered[0])
+	}
+
 	// truncate wide lines
 	wideLine := strings.Repeat("x", 100)
-	out = m.renderLogLines([]string{wideLine}, 40, 5)
+	out = m.renderLogLines([]string{wideLine}, 40, 5, 0)
 	if len(out) != 40 {
 		t.Errorf("expected truncated to 40 chars, got %d", len(out))
 	}

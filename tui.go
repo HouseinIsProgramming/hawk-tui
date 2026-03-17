@@ -21,21 +21,29 @@ const (
 )
 
 type task struct {
-	name    string
-	logFile string
-	pid     int
-	lines   []string
-	offset  int64 // track read position for incremental reads
+	name         string
+	logFile      string
+	pid          int
+	lines        []string
+	offset       int64 // track read position for incremental reads
+	scrollOffset int   // lines from bottom (0 = bottom)
+	follow       bool  // auto-scroll to bottom on new content
 }
 
 type model struct {
-	tasks     []task
-	activeTab int
-	mode      viewMode
-	width     int
-	height    int
-	dir       string
-	quitting  bool
+	tasks      []task
+	activeTab  int
+	mode       viewMode
+	width      int
+	height     int
+	dir        string
+	quitting   bool
+	searching  bool
+	searchBuf  string
+	searchHits []int // line indices matching search
+	searchIdx  int   // current match index
+	pendingG   bool  // waiting for second 'g' in 'gg'
+	showHelp   bool
 }
 
 type tickMsg time.Time
@@ -60,29 +68,10 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
-		case "tab":
-			if len(m.tasks) > 0 {
-				m.activeTab = (m.activeTab + 1) % len(m.tasks)
-			}
-		case "shift+tab":
-			if len(m.tasks) > 0 {
-				m.activeTab = (m.activeTab - 1 + len(m.tasks)) % len(m.tasks)
-			}
-		case "s":
-			m.mode = splitView
-		case "t":
-			m.mode = tabView
-		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-			idx, _ := strconv.Atoi(msg.String())
-			idx-- // 1-indexed to 0-indexed
-			if idx < len(m.tasks) {
-				m.activeTab = idx
-			}
+		if m.searching {
+			return m.updateSearch(msg)
 		}
+		return m.updateNormal(msg)
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -96,8 +85,199 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	// handle gg sequence
+	if m.pendingG {
+		m.pendingG = false
+		if key == "g" {
+			m.scrollToTop()
+			return m, nil
+		}
+		// wasn't gg, fall through to normal handling
+	}
+
+	// dismiss help overlay
+	if m.showHelp {
+		if key == "?" || key == "escape" || key == "q" {
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "q", "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+
+	// help
+	case "?":
+		m.showHelp = true
+
+	// tab switching
+	case "tab":
+		if len(m.tasks) > 0 {
+			m.activeTab = (m.activeTab + 1) % len(m.tasks)
+		}
+	case "shift+tab":
+		if len(m.tasks) > 0 {
+			m.activeTab = (m.activeTab - 1 + len(m.tasks)) % len(m.tasks)
+		}
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+		idx, _ := strconv.Atoi(key)
+		idx--
+		if idx < len(m.tasks) {
+			m.activeTab = idx
+		}
+
+	// view mode
+	case "s":
+		m.mode = splitView
+	case "t":
+		m.mode = tabView
+
+	// scrolling
+	case "j", "down":
+		m.scroll(-1)
+	case "k", "up":
+		m.scroll(1)
+	case "d", "ctrl+d":
+		m.scroll(-m.contentHeight() / 2)
+	case "u", "ctrl+u":
+		m.scroll(m.contentHeight() / 2)
+	case "f", "ctrl+f", "pgdown":
+		m.scroll(-m.contentHeight())
+	case "b", "ctrl+b", "pgup":
+		m.scroll(m.contentHeight())
+	case "G", "end", "cmd+down":
+		m.scrollToBottom()
+	case "g":
+		m.pendingG = true
+	case "home", "cmd+up":
+		m.scrollToTop()
+
+	// search
+	case "/":
+		m.searching = true
+		m.searchBuf = ""
+		m.searchHits = nil
+		m.searchIdx = 0
+	case "n":
+		m.nextSearchHit()
+	case "N":
+		m.prevSearchHit()
+	}
+
+	return m, nil
+}
+
+func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "enter":
+		m.executeSearch()
+		m.searching = false
+	case "escape", "ctrl+c":
+		m.searching = false
+		m.searchBuf = ""
+		m.searchHits = nil
+	case "backspace":
+		if len(m.searchBuf) > 0 {
+			m.searchBuf = m.searchBuf[:len(m.searchBuf)-1]
+		}
+	default:
+		if len(key) == 1 {
+			m.searchBuf += key
+		}
+	}
+	return m, nil
+}
+
+func (m *model) scroll(delta int) {
+	if len(m.tasks) == 0 {
+		return
+	}
+	t := &m.tasks[m.activeTab]
+	t.scrollOffset += delta
+	maxOffset := max(0, len(t.lines)-m.contentHeight())
+	t.scrollOffset = max(0, min(t.scrollOffset, maxOffset))
+	t.follow = t.scrollOffset == 0
+}
+
+func (m *model) scrollToBottom() {
+	if len(m.tasks) == 0 {
+		return
+	}
+	t := &m.tasks[m.activeTab]
+	t.scrollOffset = 0
+	t.follow = true
+}
+
+func (m *model) scrollToTop() {
+	if len(m.tasks) == 0 {
+		return
+	}
+	t := &m.tasks[m.activeTab]
+	t.scrollOffset = max(0, len(t.lines)-m.contentHeight())
+	t.follow = false
+}
+
+func (m model) contentHeight() int {
+	h := m.height - 3
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+func (m *model) executeSearch() {
+	if len(m.tasks) == 0 || m.searchBuf == "" {
+		return
+	}
+	t := &m.tasks[m.activeTab]
+	m.searchHits = nil
+	query := strings.ToLower(m.searchBuf)
+	for i, line := range t.lines {
+		if strings.Contains(strings.ToLower(line), query) {
+			m.searchHits = append(m.searchHits, i)
+		}
+	}
+	if len(m.searchHits) > 0 {
+		m.searchIdx = len(m.searchHits) - 1 // start at last match
+		m.jumpToSearchHit()
+	}
+}
+
+func (m *model) nextSearchHit() {
+	if len(m.searchHits) == 0 {
+		return
+	}
+	m.searchIdx = (m.searchIdx + 1) % len(m.searchHits)
+	m.jumpToSearchHit()
+}
+
+func (m *model) prevSearchHit() {
+	if len(m.searchHits) == 0 {
+		return
+	}
+	m.searchIdx = (m.searchIdx - 1 + len(m.searchHits)) % len(m.searchHits)
+	m.jumpToSearchHit()
+}
+
+func (m *model) jumpToSearchHit() {
+	if len(m.tasks) == 0 || len(m.searchHits) == 0 {
+		return
+	}
+	t := &m.tasks[m.activeTab]
+	lineIdx := m.searchHits[m.searchIdx]
+	// scroll so the hit is in the middle of the viewport
+	fromBottom := len(t.lines) - lineIdx - m.contentHeight()/2
+	t.scrollOffset = max(0, fromBottom)
+	t.follow = false
+}
+
 func (m *model) refreshTasks() {
-	// find all running tasks
 	matches, _ := filepath.Glob(filepath.Join(m.dir, "*.pid"))
 	seen := make(map[string]bool)
 
@@ -124,7 +304,6 @@ func (m *model) refreshTasks() {
 
 		logFile := strings.TrimSuffix(pidFile, ".pid") + ".log"
 
-		// find or create task
 		found := false
 		for i := range m.tasks {
 			if m.tasks[i].name == name {
@@ -135,13 +314,12 @@ func (m *model) refreshTasks() {
 			}
 		}
 		if !found {
-			t := task{name: name, logFile: logFile, pid: pid}
+			t := task{name: name, logFile: logFile, pid: pid, follow: true}
 			m.readNewLines(&t, logFile)
 			m.tasks = append(m.tasks, t)
 		}
 	}
 
-	// remove tasks that are no longer running
 	var alive []task
 	for _, t := range m.tasks {
 		if seen[t.name] {
@@ -150,7 +328,6 @@ func (m *model) refreshTasks() {
 	}
 	m.tasks = alive
 
-	// fix activeTab if out of bounds
 	if m.activeTab >= len(m.tasks) {
 		m.activeTab = max(0, len(m.tasks)-1)
 	}
@@ -174,12 +351,11 @@ func (m *model) readNewLines(t *task, logFile string) {
 
 	f.Seek(t.offset, 0)
 	buf := make([]byte, info.Size()-t.offset)
-	n, err := f.Read(buf)
+	n, _ := f.Read(buf)
 	if n > 0 {
 		newContent := string(buf[:n])
 		newLines := strings.Split(newContent, "\n")
 
-		// merge with existing: if last existing line was partial, append to it
 		if len(t.lines) > 0 && len(newLines) > 0 {
 			t.lines[len(t.lines)-1] += newLines[0]
 			t.lines = append(t.lines, newLines[1:]...)
@@ -187,7 +363,6 @@ func (m *model) readNewLines(t *task, logFile string) {
 			t.lines = append(t.lines, newLines...)
 		}
 
-		// keep last 1000 lines max
 		if len(t.lines) > 1000 {
 			t.lines = t.lines[len(t.lines)-1000:]
 		}
@@ -203,6 +378,10 @@ func (m model) View() string {
 
 	if m.width == 0 || m.height == 0 {
 		return "loading..."
+	}
+
+	if m.showHelp {
+		return m.renderHelp()
 	}
 
 	if len(m.tasks) == 0 {
@@ -239,7 +418,61 @@ var (
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#666"))
+
+	searchHighlightStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#f0883e")).
+				Foreground(lipgloss.Color("#000"))
+
+	searchBarStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f0883e")).
+			Bold(true)
 )
+
+func (m model) renderHelp() string {
+	title := activeTabStyle.Render(" hawk keybindings ")
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7ee787")).Bold(true).Width(16)
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ccc"))
+
+	bindings := []struct{ key, desc string }{
+		{"", "── Navigation ──"},
+		{"j / ↓", "Scroll down"},
+		{"k / ↑", "Scroll up"},
+		{"d / Ctrl+d", "Half page down"},
+		{"u / Ctrl+u", "Half page up"},
+		{"f / Ctrl+f", "Full page down"},
+		{"b / Ctrl+b", "Full page up"},
+		{"G / End", "Go to bottom (follow)"},
+		{"gg / Home", "Go to top"},
+		{"", "── Tabs ──"},
+		{"Tab", "Next task"},
+		{"Shift+Tab", "Previous task"},
+		{"1-9", "Jump to task"},
+		{"", "── Views ──"},
+		{"t", "Tab view"},
+		{"s", "Split view"},
+		{"", "── Search ──"},
+		{"/", "Start search"},
+		{"n", "Next match"},
+		{"N", "Previous match"},
+		{"Enter", "Confirm search"},
+		{"Escape", "Cancel search"},
+		{"", "── Other ──"},
+		{"?", "Toggle this help"},
+		{"q / Ctrl+c", "Quit"},
+	}
+
+	var lines []string
+	for _, b := range bindings {
+		if b.key == "" {
+			lines = append(lines, headerStyle.Render(b.desc))
+		} else {
+			lines = append(lines, keyStyle.Render(b.key)+descStyle.Render(b.desc))
+		}
+	}
+
+	content := title + "\n\n" + strings.Join(lines, "\n") + "\n\n" + helpStyle.Render("press ? or Esc to close")
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+}
 
 func (m model) renderEmpty() string {
 	msg := headerStyle.Render("hawk: no running tasks in " + projectName())
@@ -249,7 +482,6 @@ func (m model) renderEmpty() string {
 }
 
 func (m model) renderTab() string {
-	// tab bar
 	var tabs []string
 	for i, t := range m.tasks {
 		label := fmt.Sprintf(" %d:%s (PID %d) ", i+1, t.name, t.pid)
@@ -262,18 +494,18 @@ func (m model) renderTab() string {
 	tabBar := strings.Join(tabs, " ")
 
 	modeIndicator := headerStyle.Render("[tab view]")
-	help := helpStyle.Render("tab:cycle  1-9:select  s:split  q:quit")
 	header := tabBar + "  " + modeIndicator
-	footer := help
 
-	// content area
-	contentHeight := m.height - 3 // header + footer + padding
+	// footer
+	footer := m.renderFooter()
+
+	contentHeight := m.height - 3
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
 
 	t := m.tasks[m.activeTab]
-	content := m.renderLogLines(t.lines, m.width, contentHeight)
+	content := m.renderLogLines(t.lines, m.width, contentHeight, t.scrollOffset)
 
 	return header + "\n" + content + "\n" + footer
 }
@@ -284,10 +516,9 @@ func (m model) renderSplit() string {
 		return m.renderEmpty()
 	}
 
-	help := helpStyle.Render("[split view]  tab:cycle  1-9:select  t:tab view  q:quit")
-	availableHeight := m.height - 2 // footer + padding
+	footer := m.renderFooter()
+	availableHeight := m.height - 2
 
-	// divide height among tasks
 	paneHeight := availableHeight / n
 	if paneHeight < 3 {
 		paneHeight = 3
@@ -296,11 +527,11 @@ func (m model) renderSplit() string {
 	var panes []string
 	for i, t := range m.tasks {
 		label := fmt.Sprintf(" %s (PID %d) ", t.name, t.pid)
-		contentH := paneHeight - 2 // border takes 2 lines
+		contentH := paneHeight - 2
 		if contentH < 1 {
 			contentH = 1
 		}
-		content := m.renderLogLines(t.lines, m.width-4, contentH)
+		content := m.renderLogLines(t.lines, m.width-4, contentH, t.scrollOffset)
 
 		var pane string
 		if i == m.activeTab {
@@ -317,31 +548,107 @@ func (m model) renderSplit() string {
 		panes = append(panes, pane)
 	}
 
-	return strings.Join(panes, "\n") + "\n" + help
+	return strings.Join(panes, "\n") + "\n" + footer
 }
 
-func (m model) renderLogLines(lines []string, width, height int) string {
+func (m model) renderFooter() string {
+	if m.searching {
+		return searchBarStyle.Render("/") + m.searchBuf + "█"
+	}
+
+	var parts []string
+
+	if m.mode == tabView {
+		parts = append(parts, "tab:cycle  1-9:select  s:split")
+	} else {
+		parts = append(parts, "tab:cycle  1-9:select  t:tab")
+	}
+	parts = append(parts, "j/k:scroll  /:search  G:end  gg:top  ?:help  q:quit")
+
+	if len(m.tasks) > 0 {
+		t := m.tasks[m.activeTab]
+		if !t.follow {
+			parts = append(parts, headerStyle.Render(fmt.Sprintf("[scroll +%d]", t.scrollOffset)))
+		}
+	}
+
+	if len(m.searchHits) > 0 {
+		parts = append(parts, searchBarStyle.Render(
+			fmt.Sprintf("[%d/%d: %q]", m.searchIdx+1, len(m.searchHits), m.searchBuf)))
+	}
+
+	return helpStyle.Render(strings.Join(parts, "  "))
+}
+
+func (m model) renderLogLines(lines []string, width, height, scrollOffset int) string {
 	if len(lines) == 0 {
 		return headerStyle.Render("(no output yet)")
 	}
 
-	// take last `height` lines
-	start := len(lines) - height
+	// calculate visible window
+	end := len(lines) - scrollOffset
+	if end < 0 {
+		end = 0
+	}
+	start := end - height
 	if start < 0 {
 		start = 0
 	}
-	visible := lines[start:]
+	if end > len(lines) {
+		end = len(lines)
+	}
+	visible := lines[start:end]
 
-	// truncate lines to width
+	// build search hit set for highlighting
+	hitSet := make(map[int]bool)
+	for _, idx := range m.searchHits {
+		hitSet[idx] = true
+	}
+	activeHitLine := -1
+	if len(m.searchHits) > 0 {
+		activeHitLine = m.searchHits[m.searchIdx]
+	}
+
 	var result []string
-	for _, line := range visible {
+	for i, line := range visible {
 		if len(line) > width && width > 0 {
 			line = line[:width]
+		}
+		absIdx := start + i
+		if hitSet[absIdx] {
+			if absIdx == activeHitLine {
+				line = highlightSearch(line, m.searchBuf, true)
+			} else {
+				line = highlightSearch(line, m.searchBuf, false)
+			}
 		}
 		result = append(result, line)
 	}
 
 	return strings.Join(result, "\n")
+}
+
+func highlightSearch(line, query string, active bool) string {
+	if query == "" {
+		return line
+	}
+	lower := strings.ToLower(line)
+	queryLower := strings.ToLower(query)
+	idx := strings.Index(lower, queryLower)
+	if idx < 0 {
+		return line
+	}
+
+	before := line[:idx]
+	match := line[idx : idx+len(query)]
+	after := line[idx+len(query):]
+
+	style := searchHighlightStyle
+	if !active {
+		style = lipgloss.NewStyle().Background(lipgloss.Color("#444")).Foreground(lipgloss.Color("#fff"))
+	}
+
+	return before + style.Render(match) + after
 }
 
 func runTUI() {
