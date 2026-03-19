@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -22,10 +24,14 @@ func main() {
 		return
 	}
 
-	// handle -w flag anywhere in args
+	// handle flags anywhere in args
 	for _, arg := range os.Args[1:] {
-		if arg == "-w" || arg == "--watch" {
+		switch arg {
+		case "-w", "--watch":
 			runTUI()
+			return
+		case "-s", "--scripts":
+			runScriptPicker()
 			return
 		}
 	}
@@ -364,12 +370,204 @@ func runInteractive() {
 	tailCmd.Run()
 }
 
+// --- script discovery & picker ---
+
+type scriptEntry struct {
+	name   string
+	cmd    string
+	source string
+}
+
+func discoverScripts() []scriptEntry {
+	pm := detectPackageManager()
+	hasNx := fileExists("nx.json")
+	pkgScripts := map[string]scriptEntry{}
+	nxTargets := map[string]scriptEntry{}
+
+	filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", ".git", "dist", ".next", ".cache", "build":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		dir := filepath.Dir(path)
+
+		switch d.Name() {
+		case "package.json":
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			var pkg struct {
+				Name    string            `json:"name"`
+				Scripts map[string]string `json:"scripts"`
+			}
+			if json.Unmarshal(data, &pkg) != nil {
+				return nil
+			}
+			isRoot := dir == "."
+			pkgName := pkg.Name
+			if pkgName == "" {
+				pkgName = filepath.Base(dir)
+			}
+			for script := range pkg.Scripts {
+				var name, cmd string
+				if isRoot {
+					name = script
+					cmd = pm + " run " + script
+				} else {
+					name = pkgName + ":" + script
+					if hasNx {
+						cmd = "npx nx run " + pkgName + ":" + script
+					} else {
+						cmd = buildWorkspaceCmd(pm, pkgName, dir, script)
+					}
+				}
+				pkgScripts[name] = scriptEntry{name: name, cmd: cmd, source: path}
+			}
+
+		case "project.json":
+			if !hasNx {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			var proj struct {
+				Name    string                 `json:"name"`
+				Targets map[string]any `json:"targets"`
+			}
+			if json.Unmarshal(data, &proj) != nil {
+				return nil
+			}
+			projName := proj.Name
+			if projName == "" {
+				projName = filepath.Base(dir)
+			}
+			for target := range proj.Targets {
+				name := projName + ":" + target
+				cmd := "npx nx run " + projName + ":" + target
+				nxTargets[name] = scriptEntry{name: name, cmd: cmd, source: path}
+			}
+		}
+
+		return nil
+	})
+
+	// merge: nx targets override package.json scripts with same name
+	merged := map[string]scriptEntry{}
+	for k, v := range pkgScripts {
+		merged[k] = v
+	}
+	for k, v := range nxTargets {
+		merged[k] = v
+	}
+
+	entries := make([]scriptEntry, 0, len(merged))
+	for _, v := range merged {
+		entries = append(entries, v)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].name < entries[j].name
+	})
+	return entries
+}
+
+func runScriptPicker() {
+	scripts := discoverScripts()
+	if len(scripts) == 0 {
+		fmt.Println("hawk: no scripts found (looked for package.json and project.json)")
+		return
+	}
+
+	fzfPath, err := exec.LookPath("fzf")
+	if err != nil {
+		fmt.Println("hawk: available scripts")
+		for _, s := range scripts {
+			fmt.Printf("  %-35s %s\n", s.name, s.cmd)
+		}
+		fmt.Println("\nInstall fzf for interactive selection")
+		return
+	}
+
+	// build fzf input: name (padded) + command + source
+	cmdMap := map[string]string{}
+	var lines []string
+	for _, s := range scripts {
+		lines = append(lines, fmt.Sprintf("%-35s %-45s %s", s.name, s.cmd, s.source))
+		cmdMap[s.name] = s.cmd
+	}
+	input := strings.Join(lines, "\n")
+
+	cmd := exec.Command(fzfPath,
+		"--preview", "cat {-1}",
+		"--preview-window=right:50%",
+		"--header", projectName()+" scripts — enter to run with hawk",
+	)
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Stderr = os.Stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return // user cancelled
+	}
+
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 0 {
+		return
+	}
+	name := fields[0]
+	command, ok := cmdMap[name]
+	if !ok {
+		return
+	}
+
+	// sanitize name for hawk file naming
+	hawkName := strings.NewReplacer(":", "-", "/", "-", "@", "").Replace(name)
+
+	cmdStart([]string{hawkName, "--", command})
+}
+
+func detectPackageManager() string {
+	if fileExists("pnpm-lock.yaml") {
+		return "pnpm"
+	}
+	if fileExists("yarn.lock") {
+		return "yarn"
+	}
+	return "npm"
+}
+
+func buildWorkspaceCmd(pm, pkgName, dir, script string) string {
+	switch pm {
+	case "pnpm":
+		return "pnpm --filter " + pkgName + " run " + script
+	case "yarn":
+		return "yarn workspace " + pkgName + " run " + script
+	default:
+		return "npm --prefix " + dir + " run " + script
+	}
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 func cmdHelp() {
 	fmt.Println(`hawk — task log manager
 
 Usage:
   hawk                        Interactive log selector (fzf)
   hawk -w                     TUI: watch all running tasks
+  hawk -s                     Run a script from package.json / nx (fzf)
   hawk start <name> -- <cmd>  Start command with logging
   hawk list                   List logs for current project
   hawk output <name> [lines]  Show last N lines (default 100)
