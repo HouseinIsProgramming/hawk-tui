@@ -497,17 +497,17 @@ func runScriptPicker() {
 		return
 	}
 
-	// build fzf input: name (padded) + command + source
-	cmdMap := map[string]string{}
 	var lines []string
 	for _, s := range scripts {
-		lines = append(lines, fmt.Sprintf("%-35s %-45s %s", s.name, s.cmd, s.source))
-		cmdMap[s.name] = s.cmd
+		lines = append(lines, fmt.Sprintf("%s\t%s\t%s", s.name, s.cmd, s.source))
 	}
 	input := strings.Join(lines, "\n")
 
 	cmd := exec.Command(fzfPath,
-		"--preview", "cat {-1}",
+		"--delimiter=\t",
+		"--with-nth=1,3",
+		"--nth=1",
+		"--preview", "cat {3}",
 		"--preview-window=right:50%",
 		"--header", projectName()+" scripts — enter to run with hawk",
 	)
@@ -519,15 +519,12 @@ func runScriptPicker() {
 		return // user cancelled
 	}
 
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	if len(fields) == 0 {
+	parts := strings.Split(strings.TrimSpace(string(out)), "\t")
+	if len(parts) < 2 {
 		return
 	}
-	name := fields[0]
-	command, ok := cmdMap[name]
-	if !ok {
-		return
-	}
+	name := strings.TrimSpace(parts[0])
+	command := strings.TrimSpace(parts[1])
 
 	// sanitize name for hawk file naming
 	hawkName := strings.NewReplacer(":", "-", "/", "-", "@", "").Replace(name)
