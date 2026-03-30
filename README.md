@@ -67,6 +67,56 @@ hawk start lint -- eslint src/
 
 Output is tee'd to both stdout and a log file at `/tmp/hawk-logs/<project>/`.
 
+Starting a task that's already running is safe — hawk detects duplicates and points you to the existing process instead of spawning another.
+
+### TUI watch mode (`hawk -w`)
+
+```bash
+hawk -w
+```
+
+A full terminal UI for monitoring all running tasks at once. Supports tab and split views, vim-style scrolling, search, and clipboard copy.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 1:test-all (PID 12345)  2:build (PID 12346)  [tab view] │
+│                                                          │
+│ PASS src/utils.test.ts                                   │
+│ PASS src/api.test.ts                                     │
+│ ...                                                      │
+│                                                          │
+│ tab:cycle  1-9:select  s:split  j/k:scroll  y:copy  ... │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Keybindings:**
+
+| Key | Action |
+|---|---|
+| `j`/`k`, `↑`/`↓` | Scroll up/down |
+| `d`/`u` | Half page down/up |
+| `f`/`b` | Full page down/up |
+| `G` / `gg` | Jump to bottom / top |
+| `Tab` / `Shift+Tab` | Cycle tasks |
+| `1`–`9` | Jump to task |
+| `t` / `s` | Tab view / split view |
+| `/` | Search (case-insensitive) |
+| `n` / `N` | Next / previous match |
+| `y` | Copy visible lines to clipboard |
+| `Y` | Copy last N lines to clipboard (prompts for count) |
+| `?` | Keybinding help overlay |
+| `q` | Quit |
+
+### Script runner (`hawk -s`)
+
+```bash
+hawk -s
+```
+
+Discovers and lists all runnable scripts from `package.json` and `project.json` (Nx) files in your project. Opens an interactive fzf picker — select a script and hawk runs it automatically with the right package manager (`npm`, `pnpm`, `yarn`, or `nx`).
+
+Works with monorepos: finds scripts across all workspace packages and Nx projects.
+
 ### Watch live output
 
 ```bash
