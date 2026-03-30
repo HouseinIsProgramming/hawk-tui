@@ -692,7 +692,7 @@ func (m model) renderFooter() string {
 	} else {
 		parts = append(parts, "tab:cycle  1-9:select  t:tab")
 	}
-	parts = append(parts, "j/k:scroll  /:search  G:end  gg:top  ?:help  q:quit")
+	parts = append(parts, "j/k:scroll  /:search  y:copy  Y:copy N  ?:help  q:quit")
 
 	if len(m.tasks) > 0 {
 		t := m.tasks[m.activeTab]
