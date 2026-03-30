@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,26 +33,36 @@ type task struct {
 }
 
 type model struct {
-	tasks      []task
-	activeTab  int
-	mode       viewMode
-	width      int
-	height     int
-	dir        string
-	quitting   bool
-	searching  bool
-	searchBuf  string
-	searchHits []int // line indices matching search
-	searchIdx  int   // current match index
-	pendingG   bool  // waiting for second 'g' in 'gg'
-	showHelp   bool
+	tasks        []task
+	activeTab    int
+	mode         viewMode
+	width        int
+	height       int
+	dir          string
+	quitting     bool
+	searching    bool
+	searchBuf    string
+	searchHits   []int // line indices matching search
+	searchIdx    int   // current match index
+	pendingG     bool  // waiting for second 'g' in 'gg'
+	showHelp     bool
+	copyingLines bool   // Y mode: waiting for line count input
+	copyBuf      string // Y mode: digit buffer
+	statusMsg    string // transient status shown in footer
 }
 
 type tickMsg time.Time
+type clearStatusMsg struct{}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
+	})
+}
+
+func clearStatusCmd() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return clearStatusMsg{}
 	})
 }
 
@@ -68,6 +80,9 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.copyingLines {
+			return m.updateCopyLines(msg)
+		}
 		if m.searching {
 			return m.updateSearch(msg)
 		}
@@ -76,6 +91,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+	case clearStatusMsg:
+		m.statusMsg = ""
 
 	case tickMsg:
 		m.refreshTasks()
@@ -167,6 +185,21 @@ func (m model) updateNormal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.nextSearchHit()
 	case "N":
 		m.prevSearchHit()
+
+	// copy
+	case "y":
+		lines := m.getVisibleLines()
+		if len(lines) > 0 {
+			if err := copyToClipboard(strings.Join(lines, "\n")); err != nil {
+				m.statusMsg = "copy failed: " + err.Error()
+			} else {
+				m.statusMsg = fmt.Sprintf("copied %d lines", len(lines))
+			}
+			return m, clearStatusCmd()
+		}
+	case "Y":
+		m.copyingLines = true
+		m.copyBuf = ""
 	}
 
 	return m, nil
@@ -192,6 +225,92 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m model) updateCopyLines(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "enter":
+		m.copyingLines = false
+		if m.copyBuf == "" {
+			return m, nil
+		}
+		n, err := strconv.Atoi(m.copyBuf)
+		if err != nil || n <= 0 {
+			m.statusMsg = "invalid number"
+			m.copyBuf = ""
+			return m, clearStatusCmd()
+		}
+		lines := m.getLastNLines(n)
+		if len(lines) > 0 {
+			if err := copyToClipboard(strings.Join(lines, "\n")); err != nil {
+				m.statusMsg = "copy failed: " + err.Error()
+			} else {
+				m.statusMsg = fmt.Sprintf("copied %d lines", len(lines))
+			}
+		}
+		m.copyBuf = ""
+		return m, clearStatusCmd()
+	case "escape", "ctrl+c":
+		m.copyingLines = false
+		m.copyBuf = ""
+	case "backspace":
+		if len(m.copyBuf) > 0 {
+			m.copyBuf = m.copyBuf[:len(m.copyBuf)-1]
+		}
+	default:
+		if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+			m.copyBuf += key
+		}
+	}
+	return m, nil
+}
+
+func (m model) getVisibleLines() []string {
+	if len(m.tasks) == 0 {
+		return nil
+	}
+	t := m.tasks[m.activeTab]
+	lines := t.lines
+	height := m.contentHeight()
+
+	end := len(lines) - t.scrollOffset
+	if end < 0 {
+		end = 0
+	}
+	start := end - height
+	if start < 0 {
+		start = 0
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return lines[start:end]
+}
+
+func (m model) getLastNLines(n int) []string {
+	if len(m.tasks) == 0 {
+		return nil
+	}
+	lines := m.tasks[m.activeTab].lines
+	if n >= len(lines) {
+		return lines
+	}
+	return lines[len(lines)-n:]
+}
+
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	default:
+		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 func (m *model) scroll(delta int) {
@@ -426,6 +545,10 @@ var (
 	searchBarStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#f0883e")).
 			Bold(true)
+
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7ee787")).
+			Bold(true)
 )
 
 func (m model) renderHelp() string {
@@ -456,6 +579,9 @@ func (m model) renderHelp() string {
 		{"N", "Previous match"},
 		{"Enter", "Confirm search"},
 		{"Escape", "Cancel search"},
+		{"", "── Copy ──"},
+		{"y", "Copy visible lines"},
+		{"Y", "Copy last N lines"},
 		{"", "── Other ──"},
 		{"?", "Toggle this help"},
 		{"q / Ctrl+c", "Quit"},
@@ -555,6 +681,9 @@ func (m model) renderFooter() string {
 	if m.searching {
 		return searchBarStyle.Render("/") + m.searchBuf + "█"
 	}
+	if m.copyingLines {
+		return searchBarStyle.Render("copy last N lines: ") + m.copyBuf + "█"
+	}
 
 	var parts []string
 
@@ -575,6 +704,10 @@ func (m model) renderFooter() string {
 	if len(m.searchHits) > 0 {
 		parts = append(parts, searchBarStyle.Render(
 			fmt.Sprintf("[%d/%d: %q]", m.searchIdx+1, len(m.searchHits), m.searchBuf)))
+	}
+
+	if m.statusMsg != "" {
+		parts = append(parts, statusStyle.Render(m.statusMsg))
 	}
 
 	return helpStyle.Render(strings.Join(parts, "  "))
