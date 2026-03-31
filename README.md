@@ -38,15 +38,18 @@ cp skill/SKILL.md ~/.claude/skills/hawk/SKILL.md
 ## Commands
 
 ```bash
-hawk start <name> -- <cmd>  # start command with logging (idempotent)
-hawk list                   # list logs for current project
-hawk output <name> [lines]  # view output (less -R or last N lines)
-hawk tail <name>            # follow log in real time
-hawk stop <name>            # stop a running task
-hawk clean [hours]          # remove logs older than N hours (default 24)
-hawk                        # interactive fzf picker
-hawk -s                     # discover & run scripts from package.json / nx
-hawk -w                     # TUI: watch all running tasks
+hawk start <name> -- <cmd>     # start command with logging (idempotent)
+hawk start -b <name> -- <cmd>  # start command in background
+hawk list                      # list logs for current project
+hawk output <name> [lines]     # view output (less -R or last N lines)
+hawk tail <name>               # follow log in real time
+hawk stop <name>               # stop a running task
+hawk clean [hours]             # remove logs older than N hours (default 24)
+hawk                           # interactive fzf picker
+hawk -s                        # discover & run scripts from package.json / nx
+hawk -sb                       # discover & run scripts in background
+hawk -k                        # interactive task killer (fzf)
+hawk -w                        # TUI: watch all running tasks
 ```
 
 ## TUI watch mode (`hawk -w`)
