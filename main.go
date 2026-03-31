@@ -24,15 +24,34 @@ func main() {
 		return
 	}
 
-	// handle flags anywhere in args
-	for _, arg := range os.Args[1:] {
+	// handle flag-style first argument: -w, -s, -sb, -k, etc.
+	if arg := os.Args[1]; strings.HasPrefix(arg, "-") {
 		switch arg {
-		case "-w", "--watch":
+		case "--watch":
 			runTUI()
 			return
-		case "-s", "--scripts":
-			runScriptPicker()
+		case "--scripts":
+			runScriptPicker(false)
 			return
+		case "--kill":
+			runKillPicker()
+			return
+		}
+		if !strings.HasPrefix(arg, "--") {
+			flags := arg[1:]
+			has := func(c rune) bool { return strings.ContainsRune(flags, c) }
+			if has('w') {
+				runTUI()
+				return
+			}
+			if has('k') {
+				runKillPicker()
+				return
+			}
+			if has('s') {
+				runScriptPicker(has('b'))
+				return
+			}
 		}
 	}
 
@@ -59,8 +78,26 @@ func main() {
 }
 
 func cmdStart(args []string) {
+	// parse -b flag (only before --)
+	bg := false
+	var cleaned []string
+	pastSep := false
+	for _, a := range args {
+		if a == "--" {
+			pastSep = true
+			cleaned = append(cleaned, a)
+			continue
+		}
+		if !pastSep && (a == "-b" || a == "--background" || a == "--bg") {
+			bg = true
+			continue
+		}
+		cleaned = append(cleaned, a)
+	}
+	args = cleaned
+
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "Usage: hawk start <name> -- <command>")
+		fmt.Fprintln(os.Stderr, "Usage: hawk start [-b] <name> -- <command>")
 		os.Exit(1)
 	}
 
@@ -73,7 +110,7 @@ func cmdStart(args []string) {
 	}
 
 	if len(rest) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hawk start <name> -- <command>")
+		fmt.Fprintln(os.Stderr, "Usage: hawk start [-b] <name> -- <command>")
 		os.Exit(1)
 	}
 
@@ -103,9 +140,29 @@ func cmdStart(args []string) {
 
 	command := strings.Join(rest, " ")
 	cmd := exec.Command("sh", "-c", command)
-	cmd.Stdin = os.Stdin
 
-	// tee: write to both file and stdout
+	if bg {
+		// background: output goes to log file only, detach process
+		cmd.Stdout = f
+		cmd.Stderr = f
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+		if err := cmd.Start(); err != nil {
+			f.Close()
+			fmt.Fprintf(os.Stderr, "hawk: failed to start: %v\n", err)
+			os.Exit(1)
+		}
+
+		os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0644)
+		fmt.Fprintf(os.Stderr, "hawk: started %q in background (PID %d)\n", name, cmd.Process.Pid)
+		fmt.Fprintf(os.Stderr, "hawk: log → %s\n", logFile)
+		fmt.Fprintf(os.Stderr, "hawk: watch → hawk tail %s | hawk -w\n", name)
+		cmd.Process.Release()
+		return
+	}
+
+	// foreground: tee to both stdout/stderr and log file
+	cmd.Stdin = os.Stdin
 	multiOut := io.MultiWriter(os.Stdout, f)
 	multiErr := io.MultiWriter(os.Stderr, f)
 	cmd.Stdout = multiOut
@@ -370,6 +427,58 @@ func runInteractive() {
 	tailCmd.Run()
 }
 
+func runKillPicker() {
+	dir := logDir()
+	entries := listLogs(dir)
+
+	var running []logEntry
+	for _, e := range entries {
+		if e.running {
+			running = append(running, e)
+		}
+	}
+
+	if len(running) == 0 {
+		fmt.Println("hawk: no running tasks")
+		return
+	}
+
+	fzfPath, err := exec.LookPath("fzf")
+	if err != nil {
+		fmt.Println("hawk: running tasks")
+		for _, e := range running {
+			fmt.Printf("  %-25s %-10s %s\n", e.name, e.age, formatBytes(e.size))
+		}
+		fmt.Println("\nInstall fzf for interactive kill, or use: hawk stop <name>")
+		return
+	}
+
+	var lines []string
+	for _, e := range running {
+		lines = append(lines, fmt.Sprintf("%-25s running  %-10s %s", e.name, e.age, e.file))
+	}
+	input := strings.Join(lines, "\n")
+
+	cmd := exec.Command(fzfPath,
+		"--preview", "tail -30 {-1}",
+		"--preview-window=right:60%",
+		"--header", projectName()+" — select task to stop",
+	)
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Stderr = os.Stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 0 {
+		return
+	}
+	cmdStop([]string{fields[0]})
+}
+
 // --- script discovery & picker ---
 
 type scriptEntry struct {
@@ -480,7 +589,7 @@ func discoverScripts() []scriptEntry {
 	return entries
 }
 
-func runScriptPicker() {
+func runScriptPicker(bg bool) {
 	scripts := discoverScripts()
 	if len(scripts) == 0 {
 		fmt.Println("hawk: no scripts found (looked for package.json and project.json)")
@@ -529,7 +638,11 @@ func runScriptPicker() {
 	// sanitize name for hawk file naming
 	hawkName := strings.NewReplacer(":", "-", "/", "-", "@", "").Replace(name)
 
-	cmdStart([]string{hawkName, "--", command})
+	startArgs := []string{hawkName, "--", command}
+	if bg {
+		startArgs = []string{"-b", hawkName, "--", command}
+	}
+	cmdStart(startArgs)
 }
 
 func detectPackageManager() string {
@@ -562,16 +675,19 @@ func cmdHelp() {
 	fmt.Println(`hawk — task log manager
 
 Usage:
-  hawk                        Interactive log selector (fzf)
-  hawk -w                     TUI: watch all running tasks
-  hawk -s                     Run a script from package.json / nx (fzf)
-  hawk start <name> -- <cmd>  Start command with logging
-  hawk list                   List logs for current project
-  hawk output <name> [lines]  Show last N lines (default 100)
-  hawk tail <name>            Follow log in real time
-  hawk stop <name>            Stop a running task
-  hawk clean [hours]          Remove old logs (default 24h)
-  hawk help                   Show this help
+  hawk                           Interactive log selector (fzf)
+  hawk -w                        TUI: watch all running tasks
+  hawk -s                        Run a script from package.json / nx (fzf)
+  hawk -sb                       Run a script in the background
+  hawk -k                        Interactive task killer (fzf)
+  hawk start <name> -- <cmd>     Start command with logging
+  hawk start -b <name> -- <cmd>  Start command in background
+  hawk list                      List logs for current project
+  hawk output <name> [lines]     Show last N lines (default 100)
+  hawk tail <name>               Follow log in real time
+  hawk stop <name>               Stop a running task
+  hawk clean [hours]             Remove old logs (default 24h)
+  hawk help                      Show this help
 
 Log location: /tmp/hawk-logs/<project>/
 Setup: go install github.com/houseinisprogramming/hawk-tui@latest`)
